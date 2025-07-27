@@ -66,6 +66,7 @@ def make_inference_fn(ppo_networks: PPONetworks):
 
 def make_ppo_networks(
     observation_size: types.ObservationSize,
+    privileged_observation_size: int,
     action_size: int,
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
@@ -106,7 +107,7 @@ def make_ppo_networks(
       state_dependent_std=state_dependent_std,
   )
   value_network = networks.make_value_network(
-      observation_size,
+      privileged_observation_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=value_hidden_layer_sizes,
       activation=activation,

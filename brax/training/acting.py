@@ -14,9 +14,14 @@
 
 """Brax training acting functions."""
 
+import os
 import time
-from typing import Callable, Sequence, Tuple
+from typing import Any, Callable, List, Sequence, Tuple, Union
 
+import mediapy as media
+from moviepy.editor import VideoFileClip, clips_array
+
+from flax import struct
 from brax import envs
 from brax.training.types import Metrics
 from brax.training.types import Policy
@@ -29,6 +34,61 @@ import numpy as np
 State = envs.State
 Env = envs.Env
 
+@struct.dataclass
+class BraxState:
+  """Dynamic state that changes after every pipeline step.
+
+  Attributes:
+    q: (q_size,) joint position vector
+    qd: (qd_size,) joint velocity vector
+  """
+
+  q: np.ndarray
+  qd: np.ndarray
+
+# Function to convert dict-of-list to list-of-dict
+def dict_of_list_to_list_of_dict(data):
+    seq_length = next(iter(data.values())).shape[0]  # Get seq_length from any value
+
+    # For each index in the sequence, create a dictionary of that slice
+    # jax.tree_map removed in JAX 0.6.0
+    return [BraxState(**jax.tree.map(lambda arr: np.array(arr[i]), data)) for i in range(seq_length)]
+
+def render_video(
+    env: Env,
+    rollout: List[Any],
+    run_name: str,
+    current_step: int,
+    render_every: int = 4,
+    height: int = 480,
+    width: int = 640,
+):
+    # Define paths for each camera's video
+    video_paths: List[str] = []
+    rollout = dict_of_list_to_list_of_dict(rollout)[:500]
+
+    # Render and save videos for each camera
+    # for camera in ["perspective", "side", "top", "front"]:
+    jax.debug.print('q shape {q_shape}', q_shape=rollout[0].q.shape)
+    video_path = os.path.join("results", run_name, "videos", f"train_{current_step}.mp4")
+    os.makedirs(os.path.dirname(video_path), exist_ok=True)
+    media.write_video(
+        video_path,
+        env.render(
+            rollout[::render_every], height=height, width=width
+        ),
+        fps=1.0 / env.dt / render_every,
+    )
+    video_paths.append(video_path)
+    print(f"Saved video to {video_path}")
+
+    # Load the video clips using moviepy
+    # clips = [VideoFileClip(path) for path in video_paths]
+    # Arrange the clips in a 2x2 grid
+    # final_video = clips_array([[clips[0], clips[1]], [clips[2], clips[3]]])
+    # Save the final concatenated video
+    # final_video.write_videofile(os.path.join("results", run_name, "eval.mp4"))
+
 
 def actor_step(
     env: Env,
@@ -40,14 +100,21 @@ def actor_step(
   """Collect data."""
   actions, policy_extras = policy(env_state.obs, key)
   nstate = env.step(env_state, actions)
+  assert isinstance(nstate, envs.State)
   state_extras = {x: nstate.info[x] for x in extra_fields}
+  pipeline_state_keys = ['q', 'qd']
+  pipeline_state = {x: getattr(nstate.pipeline_state, x) for x in pipeline_state_keys}
   return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
       observation=env_state.obs,
+      privileged_observation=env_state.privileged_obs,
       action=actions,
       reward=nstate.reward,
       discount=1 - nstate.done,
       next_observation=nstate.obs,
-      extras={'policy_extras': policy_extras, 'state_extras': state_extras},
+      next_privileged_observation=nstate.privileged_obs,
+      extras={'policy_extras': policy_extras, 
+              'state_extras': state_extras,
+          'pipeline_states': pipeline_state,},
   )
 
 
@@ -88,6 +155,7 @@ class Evaluator:
       episode_length: int,
       action_repeat: int,
       key: PRNGKey,
+      render_interval: int
   ):
     """Init.
 
@@ -98,11 +166,15 @@ class Evaluator:
       episode_length: Maximum length of an episode.
       action_repeat: Number of physics steps per env step.
       key: RNG key.
+      render_interval: rendering interval
     """
     self._key = key
     self._eval_walltime = 0.0
 
     eval_env = envs.training.EvalWrapper(eval_env)
+    self.eval_env = eval_env
+    self.render_interval = render_interval
+    self.render_counter = 0
 
     def generate_eval_unroll(
         policy_params: PolicyParams, key: PRNGKey
@@ -115,7 +187,7 @@ class Evaluator:
           eval_policy_fn(policy_params),
           key,
           unroll_length=episode_length // action_repeat,
-      )[0]
+      )
 
     self._generate_eval_unroll = jax.jit(generate_eval_unroll)
     self._steps_per_unroll = episode_length * num_eval_envs
@@ -125,12 +197,16 @@ class Evaluator:
       policy_params: PolicyParams,
       training_metrics: Metrics,
       aggregate_episodes: bool = True,
-  ) -> Metrics:
+      run_name: str = "",
+      current_step: int = 0) -> Metrics:
     """Run one epoch of evaluation."""
     self._key, unroll_key = jax.random.split(self._key)
 
     t = time.time()
-    eval_state = self._generate_eval_unroll(policy_params, unroll_key)
+    eval_state, eval_data = self._generate_eval_unroll(policy_params, unroll_key)
+    if self.render_interval and self.render_counter % self.render_interval == 0:
+        render_video(self.eval_env, eval_data.extras['pipeline_states'], run_name, current_step)
+    self.render_counter += 1
     eval_metrics = eval_state.info['eval_metrics']
     eval_metrics.active_episodes.block_until_ready()
     epoch_eval_time = time.time() - t

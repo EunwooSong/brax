@@ -143,8 +143,8 @@ def compute_ppo_loss(
       normalizer_params, params.policy, data.observation
   )
 
-  baseline = value_apply(normalizer_params, params.value, data.observation)
-  terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.next_observation)
+  baseline = value_apply(normalizer_params, params.value, data.privileged_observation)
+  terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.privileged_observation)
   bootstrap_value = value_apply(normalizer_params, params.value, terminal_obs)
 
   rewards = data.reward * reward_scaling

@@ -38,6 +38,7 @@ class State(base.Base):
 
   pipeline_state: Optional[base.State]
   obs: Observation
+  privileged_obs: Optional[jax.Array]
   reward: jax.Array
   done: jax.Array
   metrics: Dict[str, jax.Array] = struct.field(default_factory=dict)
@@ -58,6 +59,11 @@ class Env(abc.ABC):
   @property
   @abc.abstractmethod
   def observation_size(self) -> ObservationSize:
+    """The size of the observation vector returned in step and reset."""
+  
+  @property
+  @abc.abstractmethod
+  def privileged_observation_size(self) -> int:
     """The size of the observation vector returned in step and reset."""
 
   @property
@@ -142,6 +148,12 @@ class PipelineEnv(Env):
     return self.sys.opt.timestep * self._n_frames  # pytype: disable=attribute-error
 
   @property
+  def privileged_observation_size(self) -> int:
+    rng = jax.random.PRNGKey(0)
+    reset_state = self.unwrapped.reset(rng)
+    return reset_state.privileged_obs.shape[-1]
+
+  @property
   def observation_size(self) -> ObservationSize:
     rng = jax.random.PRNGKey(0)
     reset_state = self.unwrapped.reset(rng)
@@ -184,6 +196,10 @@ class Wrapper(Env):
   @property
   def observation_size(self) -> ObservationSize:
     return self.env.observation_size
+  
+  @property
+  def privileged_observation_size(self) -> ObservationSize:
+    return self.env.privileged_observation_size
 
   @property
   def action_size(self) -> int:

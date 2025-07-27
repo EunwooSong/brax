@@ -206,8 +206,12 @@ def train(
     randomization_fn: Optional[
         Callable[[base.System, jnp.ndarray], Tuple[base.System, base.System]]
     ] = None,
+    eval_randomization_fn: Optional[
+        Callable[[base.System, jnp.ndarray], Tuple[base.System, base.System]]
+    ] = None,
     # ppo params
     learning_rate: float = 1e-4,
+    learning_rate_schedule_fn: Optional[Callable[..., Any]] = None,
     entropy_cost: float = 1e-4,
     discounting: float = 0.9,
     unroll_length: int = 10,
@@ -228,6 +232,7 @@ def train(
     # eval
     num_evals: int = 1,
     eval_env: Optional[envs.Env] = None,
+    render_interval: Optional[int] = 0,
     num_eval_envs: int = 128,
     deterministic_eval: bool = False,
     # training metrics
@@ -242,6 +247,7 @@ def train(
     restore_params: Optional[Any] = None,
     restore_value_fn: bool = True,
     run_evals: bool = True,
+    run_name: Optional[str] = None,
 ):
   """PPO training.
 
@@ -397,11 +403,15 @@ def train(
   if normalize_observations:
     normalize = running_statistics.normalize
   ppo_network = network_factory(
-      obs_shape, env.action_size, preprocess_observations_fn=normalize
+      obs_shape, env_state.privileged_obs.shape, env.action_size, preprocess_observations_fn=normalize
   )
   make_policy = ppo_networks.make_inference_fn(ppo_network)
 
-  optimizer = optax.adam(learning_rate=learning_rate)
+  if learning_rate_schedule_fn is None:
+      # Default linear decay schedule
+      learning_rate_schedule_fn = optax.constant_schedule(value=learning_rate)
+
+  optimizer = optax.adam(learning_rate=learning_rate_schedule_fn)
   if max_grad_norm is not None:
     # TODO: Move gradient clipping to `training/gradients.py`.
     optimizer = optax.chain(
@@ -654,7 +664,7 @@ def train(
       device_count=1,  # eval on the host only
       key_env=eval_key,
       wrap_env_fn=wrap_env_fn,
-      randomization_fn=randomization_fn,
+      randomization_fn=eval_randomization_fn if eval_randomization_fn is not None else randomization_fn,
   )
   evaluator = acting.Evaluator(
       eval_env,
@@ -663,6 +673,7 @@ def train(
       episode_length=episode_length,
       action_repeat=action_repeat,
       key=eval_key,
+      render_interval=render_interval,
   )
 
   training_metrics = {}
@@ -678,7 +689,7 @@ def train(
             training_state.params.policy,
             training_state.params.value,
         )),
-        training_metrics={},
+        training_metrics={}
     )
     logging.info(metrics)
     progress_fn(0, metrics)
@@ -737,7 +748,14 @@ def train(
       if run_evals:
         metrics = evaluator.run_evaluation(
             params,
-            training_metrics,
+            training_metrics, run_name=run_name, current_step=current_step
+        )
+
+      # add env_state.metrics to metrics
+      if env_state.metrics:
+        # average env_state.metrics
+        metrics.update(
+            jax.tree_util.tree_map(lambda x: jnp.mean(x), env_state.metrics)
         )
       logging.info(metrics)
       progress_fn(current_step, metrics)
